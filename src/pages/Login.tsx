@@ -43,25 +43,22 @@ const Login = () => {
     e.preventDefault();
     setBusy(true);
     try {
-      const { error } = await supabase.auth.signInWithPassword({
+      const { data, error } = await supabase.auth.signInWithPassword({
         email: email.trim(),
         password,
       });
       if (error) throw error;
-      await refreshProfile();
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) throw new Error('No session');
-      const { data: row } = await supabase
-        .from('users')
-        .select('role')
-        .eq('id', user.id)
-        .maybeSingle();
-      if (!row) {
+      
+      const profile = await refreshProfile(data.user);
+      
+      if (!profile) {
         toast.error('Profile missing. Complete registration first.');
         await supabase.auth.signOut();
+        setBusy(false);
         return;
       }
-      const role = row.role as 'admin' | 'teacher';
+      
+      const role = profile.role as 'admin' | 'teacher';
       toast.success('Signed in');
       const defaultPath = role === 'admin' ? '/admin' : '/teacher';
       const ok =
@@ -73,7 +70,6 @@ const Login = () => {
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Sign in failed';
       toast.error(message);
-    } finally {
       setBusy(false);
     }
   };

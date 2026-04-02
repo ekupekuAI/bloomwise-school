@@ -38,7 +38,7 @@ type AppContextValue = {
   school: School | null;
   schoolId: string | null;
   loading: boolean;
-  refreshProfile: () => Promise<void>;
+  refreshProfile: (sessionUser?: User) => Promise<UserProfile | null>;
   signOut: () => Promise<void>;
 };
 
@@ -48,28 +48,24 @@ async function fetchProfileAndSchool(userId: string): Promise<{
   profile: UserProfile | null;
   school: School | null;
 }> {
-  const { data: profile, error: pErr } = await supabase
+  const { data, error } = await supabase
     .from('users')
-    .select('*')
+    .select('*, schools(*)')
     .eq('id', userId)
     .maybeSingle();
 
-  if (pErr || !profile) {
+  if (error || !data) {
     return { profile: null, school: null };
   }
 
-  const typed = profile as UserProfile;
-  const { data: school, error: sErr } = await supabase
-    .from('schools')
-    .select('*')
-    .eq('id', typed.school_id)
-    .maybeSingle();
+  // Typecasting to separate data from the joined 'schools' payload
+  const { schools, ...profileData } = data as any;
+  const schoolPayload = Array.isArray(schools) ? schools[0] : schools;
 
-  if (sErr || !school) {
-    return { profile: typed, school: null };
-  }
-
-  return { profile: typed, school: school as School };
+  return {
+    profile: profileData as UserProfile,
+    school: (schoolPayload as School) || null,
+  };
 }
 
 export function AppProvider({ children }: { children: ReactNode }) {
@@ -78,18 +74,19 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [school, setSchool] = useState<School | null>(null);
   const [loading, setLoading] = useState(true);
 
-  const refreshProfile = useCallback(async () => {
-    const { data: { user } } = await supabase.auth.getUser();
+  const refreshProfile = useCallback(async (sessionUser?: User): Promise<UserProfile | null> => {
+    const user = sessionUser || (await supabase.auth.getUser()).data.user;
     if (!user) {
       setCurrentUser(null);
       setUserProfile(null);
       setSchool(null);
-      return;
+      return null;
     }
-    setCurrentUser(user);
     const { profile, school: sch } = await fetchProfileAndSchool(user.id);
+    setCurrentUser(user);
     setUserProfile(profile);
     setSchool(sch);
+    return profile;
   }, []);
 
   useEffect(() => {
@@ -106,10 +103,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
           setSchool(null);
           return;
         }
-        setCurrentUser(session.user);
         const { profile, school: sch } = await fetchProfileAndSchool(
           session.user.id
         );
+        setCurrentUser(session.user);
         setUserProfile(profile);
         setSchool(sch);
       }
