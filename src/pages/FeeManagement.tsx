@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { IndianRupee, X } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 import { jsPDF } from 'jspdf';
@@ -8,7 +8,9 @@ import { Label } from '@/components/ui/label';
 import DashboardLayout from '@/components/DashboardLayout';
 import { supabase } from '@/lib/supabase';
 import { useApp } from '@/context/AppContext';
-import { currentAcademicYearLabel } from '@/lib/academicYear';
+import { academicYearRange, currentAcademicYearLabel } from '@/lib/academicYear';
+import { toLocalISODate } from '@/lib/dates';
+import { feeStatus, sumPaymentsByStudent } from '@/lib/fees';
 import { generateReceiptNumber } from '@/lib/receipt';
 import { toast } from 'sonner';
 
@@ -31,11 +33,12 @@ type FeeRow = {
   lastPayment: string | null;
 };
 
-const tabs = ['All Students', 'Paid', 'Unpaid', 'Overdue'];
+const tabs = ['All Students', 'Paid', 'Partial', 'Unpaid'];
 
 const FeeManagement = () => {
   const { schoolId, userProfile, school } = useApp();
   const academicYear = currentAcademicYearLabel();
+  const { start: yearStart, end: yearEnd } = academicYearRange();
 
   const [activeTab, setActiveTab] = useState(0);
   const [showModal, setShowModal] = useState(false);
@@ -47,9 +50,12 @@ const FeeManagement = () => {
 
   const [amount, setAmount] = useState('5000');
   const [payMode, setPayMode] = useState<ModeKey>('cash');
-  const [payDate, setPayDate] = useState(new Date().toISOString().split('T')[0]);
+  const [payDate, setPayDate] = useState(toLocalISODate());
   const [note, setNote] = useState('');
   const [receiptNo, setReceiptNo] = useState('');
+  const [saving, setSaving] = useState(false);
+  // Ref (not state) so rapid repeat clicks in the same tick can't record duplicate payments.
+  const savingRef = useRef(false);
 
   const load = useCallback(async () => {
     if (!schoolId) return;
@@ -79,13 +85,14 @@ const FeeManagement = () => {
       .from('fee_payments')
       .select('student_id, amount_paid, payment_date')
       .eq('school_id', schoolId)
+      .gte('payment_date', yearStart)
+      .lte('payment_date', yearEnd)
       .in('student_id', ids.length ? ids : ['00000000-0000-0000-0000-000000000000'])
       .order('payment_date', { ascending: false });
 
-    const paidMap: Record<string, number> = {};
+    const paidMap = sumPaymentsByStudent(pays ?? []);
     const lastMap: Record<string, string> = {};
-    (pays ?? []).forEach((p: { student_id: string; amount_paid: number; payment_date: string }) => {
-      paidMap[p.student_id] = (paidMap[p.student_id] ?? 0) + Number(p.amount_paid);
+    (pays ?? []).forEach((p: { student_id: string; payment_date: string }) => {
       if (!lastMap[p.student_id]) lastMap[p.student_id] = p.payment_date;
     });
 
@@ -119,37 +126,43 @@ const FeeManagement = () => {
     });
     setStats({ collected, pending, defaulters: def });
     setLoading(false);
-  }, [schoolId, academicYear]);
+  }, [schoolId, academicYear, yearStart, yearEnd]);
 
   useEffect(() => {
     void load();
   }, [load]);
 
-  const withStatus = (r: FeeRow) => {
-    const bal = r.total - r.paid;
-    if (r.total <= 0) return bal <= 0 ? 'paid' : 'unpaid';
-    if (r.paid >= r.total) return 'paid';
-    if (r.paid <= 0) return 'unpaid';
-    return 'overdue';
-  };
+  const withStatus = (r: FeeRow) => feeStatus(r.total, r.paid);
 
   const filtered = rows.filter((s) => {
     const st = withStatus(s);
     if (activeTab === 1) return st === 'paid';
-    if (activeTab === 2) return st === 'unpaid';
-    if (activeTab === 3) return st === 'overdue';
+    if (activeTab === 2) return st === 'partial';
+    if (activeTab === 3) return st === 'unpaid';
     return true;
   });
 
   const student = rows.find((s) => s.id === selectedStudent);
 
   const collectSubmit = async () => {
-    if (!schoolId || !userProfile || !selectedStudent) return;
+    if (!schoolId || !userProfile || !selectedStudent || savingRef.current) return;
     const amt = Number(amount);
     if (!amt || amt <= 0) {
       toast.error('Enter a valid amount');
       return;
     }
+    savingRef.current = true;
+    setSaving(true);
+    try {
+      await recordPayment(amt);
+    } finally {
+      savingRef.current = false;
+      setSaving(false);
+    }
+  };
+
+  const recordPayment = async (amt: number) => {
+    if (!schoolId || !userProfile || !selectedStudent) return;
     const rec = generateReceiptNumber();
     const { data: existingFee } = await supabase
       .from('fees')
@@ -200,7 +213,7 @@ const FeeManagement = () => {
     doc.text(`Receipt: ${receiptNo}`, 14, 34);
     doc.text(`Student: ${student.full_name}`, 14, 42);
       doc.text(`Class: ${student.class}-${student.section}`, 14, 50);
-    doc.text(`Amount: ₹${Number(amount).toLocaleString()}`, 14, 58);
+    doc.text(`Amount: Rs. ${Number(amount).toLocaleString('en-IN')}`, 14, 58);
     doc.text(`Date: ${payDate}`, 14, 66);
       doc.text(`Mode: ${modeLabel[payMode]}`, 14, 74);
     doc.save(`${receiptNo}.pdf`);
@@ -210,7 +223,7 @@ const FeeManagement = () => {
     <DashboardLayout role="admin" title="Fee Management">
       <div className="grid sm:grid-cols-3 gap-4 mb-5">
         <div className="stat-card">
-          <p className="text-sm text-muted-foreground">Recorded payments (year)</p>
+          <p className="text-sm text-muted-foreground">Collected ({academicYear})</p>
           <p className="text-2xl font-bold text-foreground">₹{stats.collected.toLocaleString()}</p>
         </div>
         <div className="stat-card">
@@ -261,6 +274,12 @@ const FeeManagement = () => {
                     Loading…
                   </td>
                 </tr>
+              ) : filtered.length === 0 ? (
+                <tr>
+                  <td colSpan={7} className="px-4 py-10 text-center text-muted-foreground">
+                    {rows.length === 0 ? 'No active students yet.' : 'No students in this view.'}
+                  </td>
+                </tr>
               ) : (
                 filtered.map((s) => (
                   <tr key={s.id} className="border-b table-row-hover">
@@ -285,6 +304,8 @@ const FeeManagement = () => {
                           setShowModal(true);
                           setShowReceipt(false);
                           setReceiptNo('');
+                          setNote('');
+                          setPayDate(toLocalISODate());
                           setAmount(String(Math.max(0, s.total - s.paid) || 1000));
                         }}
                       >
@@ -355,8 +376,8 @@ const FeeManagement = () => {
                   <Button variant="outline" className="flex-1" type="button" onClick={() => setShowModal(false)}>
                     Cancel
                   </Button>
-                  <Button className="flex-1" type="button" onClick={() => void collectSubmit()}>
-                    Collect Fee
+                  <Button className="flex-1" type="button" disabled={saving} onClick={() => void collectSubmit()}>
+                    {saving ? 'Saving…' : 'Collect Fee'}
                   </Button>
                 </div>
               </>

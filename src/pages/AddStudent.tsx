@@ -10,6 +10,8 @@ import { supabase } from '@/lib/supabase';
 import { useApp } from '@/context/AppContext';
 import { currentAcademicYearLabel } from '@/lib/academicYear';
 import { toast } from 'sonner';
+import { useSignedPhotoUrl } from '@/components/StudentPhoto';
+import { PHOTO_BUCKET, photoPath } from '@/lib/photos';
 
 const AddStudent = () => {
   const navigate = useNavigate();
@@ -30,6 +32,8 @@ const AddStudent = () => {
   const [address, setAddress] = useState('');
   const [annualFee, setAnnualFee] = useState('');
   const [photoUrl, setPhotoUrl] = useState<string | null>(null);
+  const [localPreview, setLocalPreview] = useState<string | null>(null);
+  const savedPhoto = useSignedPhotoUrl(photoUrl);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(!!editId);
 
@@ -73,19 +77,34 @@ const AddStudent = () => {
     })();
   }, [editId, schoolId, navigate]);
 
+  useEffect(() => () => {
+    if (localPreview) URL.revokeObjectURL(localPreview);
+  }, [localPreview]);
+
+  const onPhotoPicked = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith('image/') || file.size > 5 * 1024 * 1024) {
+      toast.error('Choose an image under 5 MB');
+      e.target.value = '';
+      return;
+    }
+    setLocalPreview(URL.createObjectURL(file));
+  };
+
+  /** Uploads to the private bucket and returns the storage path (read later via signed URLs). */
   const uploadPhoto = async (file: File): Promise<string | null> => {
     if (!schoolId) return null;
-    const ext = file.name.split('.').pop() || 'jpg';
+    const ext = (file.name.split('.').pop() || 'jpg').toLowerCase().replace(/[^a-z0-9]/g, '') || 'jpg';
     const path = `${schoolId}/${crypto.randomUUID()}.${ext}`;
     const { error: upErr } = await supabase.storage
-      .from('student-photos')
-      .upload(path, file, { upsert: true });
+      .from(PHOTO_BUCKET)
+      .upload(path, file, { upsert: true, contentType: file.type });
     if (upErr) {
-      toast.error(upErr.message);
+      toast.error(`Photo not uploaded: ${upErr.message}`);
       return null;
     }
-    const { data } = supabase.storage.from('student-photos').getPublicUrl(path);
-    return data.publicUrl;
+    return path;
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -93,7 +112,7 @@ const AddStudent = () => {
     if (!schoolId || !userProfile) return;
     setBusy(true);
     try {
-      let url = photoUrl;
+      let url = photoPath(photoUrl);
       const file = fileRef.current?.files?.[0];
       if (file) {
         const uploaded = await uploadPhoto(file);
@@ -140,25 +159,24 @@ const AddStudent = () => {
           .eq('student_id', studentId)
           .eq('academic_year', year)
           .maybeSingle();
-        if (existing) {
-          await supabase
-            .from('fees')
-            .update({ total_fee_amount: feeNum })
-            .eq('id', (existing as { id: string }).id);
-        } else if (feeNum >= 0) {
-          await supabase.from('fees').insert({
-            school_id: schoolId,
-            student_id: studentId,
-            total_fee_amount: feeNum,
-            academic_year: year,
-          });
-        }
+        const { error: feeErr } = existing
+          ? await supabase
+              .from('fees')
+              .update({ total_fee_amount: feeNum })
+              .eq('id', (existing as { id: string }).id)
+          : await supabase.from('fees').insert({
+              school_id: schoolId,
+              student_id: studentId,
+              total_fee_amount: Math.max(0, feeNum),
+              academic_year: year,
+            });
+        if (feeErr) toast.error(`Student saved, but the fee was not: ${feeErr.message}`);
       }
 
       toast.success(editId ? 'Student updated' : 'Student added');
       navigate('/students');
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Save failed';
+      const msg = (err as { message?: string })?.message || 'Save failed';
       toast.error(msg);
     } finally {
       setBusy(false);
@@ -177,15 +195,16 @@ const AddStudent = () => {
     <DashboardLayout role="admin" title={editId ? 'Edit Student' : 'Add Student'}>
       <div className="max-w-2xl mx-auto card-elevated p-6 animate-slide-up">
         <form onSubmit={handleSubmit} className="space-y-5">
-          <input ref={fileRef} type="file" accept="image/*" className="hidden" />
+          <input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={onPhotoPicked} />
           <div className="flex justify-center mb-2">
             <button
               type="button"
               onClick={() => fileRef.current?.click()}
+              aria-label="Choose student photo"
               className="w-24 h-24 rounded-full border-2 border-dashed border-border flex items-center justify-center cursor-pointer hover:border-primary transition-colors overflow-hidden"
             >
-              {photoUrl ? (
-                <img src={photoUrl} alt="" className="w-full h-full object-cover" />
+              {localPreview || savedPhoto ? (
+                <img src={localPreview || savedPhoto || ''} alt="" className="w-full h-full object-cover" />
               ) : (
                 <ImagePlus className="w-8 h-8 text-muted-foreground" />
               )}
@@ -193,28 +212,28 @@ const AddStudent = () => {
           </div>
           <div className="grid sm:grid-cols-2 gap-4">
             <div>
-              <Label>Full Name</Label>
-              <Input className="mt-1.5" value={fullName} onChange={(e) => setFullName(e.target.value)} required />
+              <Label htmlFor="st-full-name">Full Name</Label>
+              <Input id="st-full-name" className="mt-1.5" value={fullName} onChange={(e) => setFullName(e.target.value)} required />
             </div>
             <div>
-              <Label>Roll Number</Label>
-              <Input className="mt-1.5" value={rollNumber} onChange={(e) => setRollNumber(e.target.value)} required />
+              <Label htmlFor="st-roll-number">Roll Number</Label>
+              <Input id="st-roll-number" className="mt-1.5" value={rollNumber} onChange={(e) => setRollNumber(e.target.value)} required />
             </div>
             <div>
-              <Label>Class</Label>
-              <Input className="mt-1.5" placeholder="e.g. 10" value={cls} onChange={(e) => setCls(e.target.value)} required />
+              <Label htmlFor="st-class">Class</Label>
+              <Input id="st-class" className="mt-1.5" placeholder="e.g. 10" value={cls} onChange={(e) => setCls(e.target.value)} required />
             </div>
             <div>
-              <Label>Section</Label>
-              <Input className="mt-1.5" placeholder="e.g. A" value={section} onChange={(e) => setSection(e.target.value)} required />
+              <Label htmlFor="st-section">Section</Label>
+              <Input id="st-section" className="mt-1.5" placeholder="e.g. A" value={section} onChange={(e) => setSection(e.target.value)} required />
             </div>
             <div>
-              <Label>Date of Birth</Label>
-              <Input type="date" className="mt-1.5" value={dob} onChange={(e) => setDob(e.target.value)} />
+              <Label htmlFor="st-date-of-birth">Date of Birth</Label>
+              <Input id="st-date-of-birth" type="date" className="mt-1.5" value={dob} onChange={(e) => setDob(e.target.value)} />
             </div>
             <div>
-              <Label>Gender</Label>
-              <select
+              <Label htmlFor="st-gender">Gender</Label>
+              <select id="st-gender"
                 className="w-full mt-1.5 text-sm border rounded-lg px-3 py-2 bg-card text-foreground"
                 value={gender}
                 onChange={(e) => setGender(e.target.value)}
@@ -225,20 +244,20 @@ const AddStudent = () => {
               </select>
             </div>
             <div>
-              <Label>Parent/Guardian Name</Label>
-              <Input className="mt-1.5" value={parentName} onChange={(e) => setParentName(e.target.value)} />
+              <Label htmlFor="st-parent-guardian-name">Parent/Guardian Name</Label>
+              <Input id="st-parent-guardian-name" className="mt-1.5" value={parentName} onChange={(e) => setParentName(e.target.value)} />
             </div>
             <div>
-              <Label>Parent Phone</Label>
-              <Input className="mt-1.5" value={parentPhone} onChange={(e) => setParentPhone(e.target.value)} />
+              <Label htmlFor="st-parent-phone">Parent Phone</Label>
+              <Input id="st-parent-phone" className="mt-1.5" value={parentPhone} onChange={(e) => setParentPhone(e.target.value)} />
             </div>
             <div className="sm:col-span-2">
-              <Label>Parent Email</Label>
-              <Input type="email" className="mt-1.5" value={parentEmail} onChange={(e) => setParentEmail(e.target.value)} />
+              <Label htmlFor="st-parent-email">Parent Email</Label>
+              <Input id="st-parent-email" type="email" className="mt-1.5" value={parentEmail} onChange={(e) => setParentEmail(e.target.value)} />
             </div>
             <div className="sm:col-span-2">
-              <Label>Annual fee (current year)</Label>
-              <Input
+              <Label htmlFor="st-annual-fee-current-year">Annual fee (current year)</Label>
+              <Input id="st-annual-fee-current-year"
                 type="number"
                 min={0}
                 className="mt-1.5"
@@ -249,8 +268,8 @@ const AddStudent = () => {
             </div>
           </div>
           <div>
-            <Label>Address</Label>
-            <Textarea className="mt-1.5" rows={3} value={address} onChange={(e) => setAddress(e.target.value)} />
+            <Label htmlFor="st-address">Address</Label>
+            <Textarea id="st-address" className="mt-1.5" rows={3} value={address} onChange={(e) => setAddress(e.target.value)} />
           </div>
           <div className="flex gap-3 justify-end pt-2">
             <Button type="button" variant="outline" onClick={() => navigate('/students')}>

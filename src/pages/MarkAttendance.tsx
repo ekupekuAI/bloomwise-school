@@ -6,6 +6,8 @@ import DashboardLayout from '@/components/DashboardLayout';
 import { supabase } from '@/lib/supabase';
 import { useApp } from '@/context/AppContext';
 import { toast } from 'sonner';
+import { toLocalISODate } from '@/lib/dates';
+import { parseClassKey, uniqueClassKeys } from '@/lib/classes';
 
 type Status = 'present' | 'absent' | 'late';
 
@@ -23,10 +25,11 @@ const MarkAttendance = () => {
 
   const [classOptions, setClassOptions] = useState<string[]>([]);
   const [selectedClassKey, setSelectedClassKey] = useState('');
-  const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
+  const [date, setDate] = useState(toLocalISODate());
   const [students, setStudents] = useState<StudentRow[]>([]);
   const [attendance, setAttendance] = useState<Record<string, Status>>({});
   const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     if (!schoolId) return;
@@ -36,10 +39,9 @@ const MarkAttendance = () => {
         .select('class, section')
         .eq('school_id', schoolId)
         .eq('is_active', true);
-      const uniq = Array.from(
-        new Set((data ?? []).map((r: { class: string; section: string }) => `${r.class}-${r.section}`))
-      ).sort();
+      const uniq = uniqueClassKeys(data ?? []);
       setClassOptions(uniq);
+      if (!uniq.length) setLoading(false);
       setSelectedClassKey((prev) => (prev && uniq.includes(prev) ? prev : uniq[0] || ''));
     })();
   }, [schoolId]);
@@ -51,7 +53,7 @@ const MarkAttendance = () => {
       return;
     }
     setLoading(true);
-    const [c, s] = selectedClassKey.split('-');
+    const { cls: c, section: s } = parseClassKey(selectedClassKey);
     const { data: studs, error: e1 } = await supabase
       .from('students')
       .select('id, full_name, roll_number, class, section')
@@ -109,7 +111,7 @@ const MarkAttendance = () => {
   };
 
   const submit = async () => {
-    if (!schoolId || !userProfile || !students.length) return;
+    if (!schoolId || !userProfile || !students.length || saving) return;
     const rows = students.map((s) => ({
       school_id: schoolId,
       student_id: s.id,
@@ -117,9 +119,11 @@ const MarkAttendance = () => {
       status: getStatus(s.id),
       marked_by: userProfile.id,
     }));
+    setSaving(true);
     const { error } = await supabase.from('attendance').upsert(rows, {
       onConflict: 'student_id,date',
     });
+    setSaving(false);
     if (error) {
       toast.error(error.message);
       return;
@@ -131,8 +135,9 @@ const MarkAttendance = () => {
     <DashboardLayout role={role} title="Mark Attendance">
       <div className="max-w-2xl mx-auto space-y-5">
         <div className="card-elevated p-5 flex flex-col sm:flex-row gap-3">
-          <Input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="sm:w-44" />
+          <Input type="date" value={date} max={toLocalISODate()} onChange={(e) => setDate(e.target.value)} className="sm:w-44" aria-label="Attendance date" />
           <select
+            aria-label="Class"
             className="text-sm border rounded-lg px-3 py-2 bg-card text-foreground"
             value={selectedClassKey}
             onChange={(e) => setSelectedClassKey(e.target.value)}
@@ -151,6 +156,10 @@ const MarkAttendance = () => {
         <div className="card-elevated overflow-hidden animate-slide-up">
           {loading ? (
             <p className="p-6 text-sm text-muted-foreground">Loading…</p>
+          ) : students.length === 0 ? (
+            <p className="p-6 text-sm text-muted-foreground">
+              {classOptions.length ? 'No active students in this class.' : 'No students yet — add students before marking attendance.'}
+            </p>
           ) : (
             students.map((s) => {
               const status = getStatus(s.id);
@@ -193,8 +202,8 @@ const MarkAttendance = () => {
           )}
         </div>
 
-        <Button className="w-full" type="button" onClick={() => void submit()} disabled={!students.length}>
-          Submit Attendance
+        <Button className="w-full" type="button" onClick={() => void submit()} disabled={!students.length || saving}>
+          {saving ? 'Saving…' : 'Submit Attendance'}
         </Button>
       </div>
     </DashboardLayout>

@@ -1,12 +1,16 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useParams } from 'react-router-dom';
-import { User, Mail, Phone, MapPin } from 'lucide-react';
+import { Mail, Phone, MapPin } from 'lucide-react';
+import { Link } from 'react-router-dom';
+import { StudentPhoto } from '@/components/StudentPhoto';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { format, subDays, eachDayOfInterval, parseISO, isSameDay } from 'date-fns';
 import DashboardLayout from '@/components/DashboardLayout';
 import { supabase } from '@/lib/supabase';
 import { useApp } from '@/context/AppContext';
-import { currentAcademicYearLabel } from '@/lib/academicYear';
+import { academicYearRange, currentAcademicYearLabel } from '@/lib/academicYear';
+import { toLocalISODate } from '@/lib/dates';
+import { feeStatus, feeStatusBadge, feeStatusLabel } from '@/lib/fees';
 
 const tabs = ['Attendance', 'Marks', 'Fee History', 'Timeline'];
 
@@ -28,6 +32,7 @@ const StudentDetail = () => {
   const role = userProfile?.role ?? 'admin';
   const [activeTab, setActiveTab] = useState(0);
   const [student, setStudent] = useState<Student | null>(null);
+  const [notFound, setNotFound] = useState(false);
   const [attendanceRows, setAttendanceRows] = useState<{ date: string; status: string }[]>([]);
   const [marksJoint, setMarksJoint] = useState<
     { subject: string; max: number; obtained: number; grade: string | null; exam: string }[]
@@ -49,7 +54,11 @@ const StudentDetail = () => {
         .eq('id', id)
         .eq('school_id', schoolId)
         .maybeSingle();
-      if (s) setStudent(s as Student);
+      if (!s) {
+        setNotFound(true);
+        return;
+      }
+      setStudent(s as Student);
 
       const { data: att } = await supabase
         .from('attendance')
@@ -109,7 +118,13 @@ const StudentDetail = () => {
         .order('payment_date', { ascending: false });
       const plist = (pays ?? []) as typeof payments;
       setPayments(plist);
-      setFeePaid(plist.reduce((a, p) => a + Number(p.amount_paid), 0));
+      // Balance is against this academic year's fee, so only count this year's payments.
+      const { start, end } = academicYearRange();
+      setFeePaid(
+        plist
+          .filter((p) => p.payment_date >= start && p.payment_date <= end)
+          .reduce((a, p) => a + Number(p.amount_paid), 0)
+      );
 
       const tl: { date: string; action: string }[] = [];
       plist.slice(0, 8).forEach((p) => {
@@ -127,14 +142,18 @@ const StudentDetail = () => {
       (recentAtt ?? []).forEach((a: { date: string; status: string }) => {
         tl.push({ date: a.date, action: `Attendance: ${a.status}` });
       });
+      tl.sort((a, b) => b.date.localeCompare(a.date));
       setTimeline(tl);
     })();
   }, [id, schoolId]);
 
+  // Percentage over the same 30-day window the heatmap shows.
   const attendancePct = useMemo(() => {
-    if (!attendanceRows.length) return 0;
-    const present = attendanceRows.filter((a) => a.status === 'present').length;
-    return Math.round((present / attendanceRows.length) * 100);
+    const from = toLocalISODate(subDays(new Date(), 29));
+    const recent = attendanceRows.filter((a) => a.date >= from);
+    if (!recent.length) return 0;
+    const present = recent.filter((a) => a.status === 'present').length;
+    return Math.round((present / recent.length) * 100);
   }, [attendanceRows]);
 
   const heatmapDays = useMemo(() => {
@@ -153,6 +172,20 @@ const StudentDetail = () => {
     });
   }, [attendanceRows]);
 
+  if (notFound) {
+    return (
+      <DashboardLayout role={role} title="Student Details">
+        <div className="card-elevated p-8 text-center max-w-md mx-auto">
+          <p className="font-medium text-foreground">Student not found</p>
+          <p className="text-sm text-muted-foreground mt-1">It may have been removed, or belongs to another school.</p>
+          <Link to="/students" className="inline-block mt-4 text-sm text-primary font-medium hover:underline">
+            Back to students
+          </Link>
+        </div>
+      </DashboardLayout>
+    );
+  }
+
   if (!student) {
     return (
       <DashboardLayout role={role} title="Student Details">
@@ -162,26 +195,18 @@ const StudentDetail = () => {
   }
 
   const displayClass = `${student.class}-${student.section}`;
-  const feeOk = feeTotal > 0 && feePaid >= feeTotal;
+  const fs = feeStatus(feeTotal, feePaid);
 
   return (
     <DashboardLayout role={role} title="Student Details">
       <div className="max-w-4xl mx-auto space-y-5 animate-fade-in">
         <div className="card-elevated p-6">
           <div className="flex flex-col sm:flex-row items-start gap-5">
-            <div className="w-20 h-20 rounded-2xl bg-primary/10 overflow-hidden flex items-center justify-center shrink-0">
-              {student.photo_url ? (
-                <img src={student.photo_url} alt="" className="w-full h-full object-cover" />
-              ) : (
-                <User className="w-10 h-10 text-primary" />
-              )}
-            </div>
+            <StudentPhoto value={student.photo_url} className="w-20 h-20 rounded-2xl" iconClassName="w-10 h-10" />
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-3 flex-wrap">
                 <h2 className="text-xl font-bold text-foreground">{student.full_name}</h2>
-                <span className={feeOk ? 'badge-paid' : 'badge-unpaid'}>
-                  {feeOk ? 'Fees Paid' : 'Fees Due'}
-                </span>
+                <span className={feeStatusBadge[fs]}>Fees: {feeStatusLabel[fs]}</span>
               </div>
               <p className="text-muted-foreground text-sm mt-1">
                 Class {displayClass} • Roll #{student.roll_number}
@@ -283,6 +308,11 @@ const StudentDetail = () => {
                   </tr>
                 </thead>
                 <tbody>
+                  {marksJoint.length === 0 && (
+                    <tr>
+                      <td colSpan={5} className="px-4 py-8 text-center text-muted-foreground">No marks recorded yet.</td>
+                    </tr>
+                  )}
                   {marksJoint.map((m, idx) => (
                     <tr key={idx} className="border-b table-row-hover">
                       <td className="px-4 py-3 text-foreground">{m.subject}</td>
@@ -328,7 +358,7 @@ const StudentDetail = () => {
                 <p className="text-lg font-bold text-foreground">₹{feeTotal.toLocaleString()}</p>
               </div>
               <div>
-                <p className="text-xs text-muted-foreground">Total Paid</p>
+                <p className="text-xs text-muted-foreground">Paid this year</p>
                 <p className="text-lg font-bold text-foreground">₹{feePaid.toLocaleString()}</p>
               </div>
               <div>
@@ -348,8 +378,13 @@ const StudentDetail = () => {
                 </tr>
               </thead>
               <tbody>
-                {payments.map((f) => (
-                  <tr key={f.receipt_number} className="border-b table-row-hover">
+                {payments.length === 0 && (
+                  <tr>
+                    <td colSpan={4} className="px-4 py-8 text-center text-muted-foreground">No payments recorded.</td>
+                  </tr>
+                )}
+                {payments.map((f, i) => (
+                  <tr key={`${f.receipt_number}-${i}`} className="border-b table-row-hover">
                     <td className="px-4 py-3 text-foreground">{f.payment_date}</td>
                     <td className="px-4 py-3 font-medium text-foreground">
                       ₹{Number(f.amount_paid).toLocaleString()}

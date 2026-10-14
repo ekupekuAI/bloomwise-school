@@ -10,6 +10,7 @@ import { supabase } from '@/lib/supabase';
 import { useApp } from '@/context/AppContext';
 import { gradeFromPercentage } from '@/lib/grades';
 import { toast } from 'sonner';
+import { parseClassKey, uniqueClassKeys } from '@/lib/classes';
 
 type StudentRow = {
   id: string;
@@ -22,15 +23,16 @@ type StudentRow = {
 
 function buildReportPdf(opts: {
   schoolName: string;
+  examLabel: string;
   student: StudentRow;
   marks: { subject: string; max: number; obtained: number; grade: string }[];
 }) {
-  const { schoolName, student, marks } = opts;
+  const { schoolName, examLabel, student, marks } = opts;
   const doc = new jsPDF();
   doc.setFontSize(16);
   doc.text(schoolName, 14, 16);
   doc.setFontSize(11);
-  doc.text('Report card', 14, 24);
+  doc.text(`Report card — ${examLabel}`, 14, 24);
   doc.text(
     `${student.full_name} — Class ${student.class}-${student.section} — Roll ${student.roll_number}`,
     14,
@@ -69,6 +71,9 @@ const Reports = () => {
 
   const [classOptions, setClassOptions] = useState<string[]>([]);
   const [selectedClassKey, setSelectedClassKey] = useState('');
+  const [exams, setExams] = useState<{ id: string; name: string }[]>([]);
+  const [examId, setExamId] = useState('');
+  const [classData, setClassData] = useState<(StudentRow & { marks: { subject: string; max: number; obtained: number; grade: string }[] })[]>([]);
   const [showPreview, setShowPreview] = useState(false);
   const [previewStudent, setPreviewStudent] = useState<StudentRow | null>(null);
   const [previewMarks, setPreviewMarks] = useState<
@@ -83,17 +88,36 @@ const Reports = () => {
         .select('class, section')
         .eq('school_id', schoolId)
         .eq('is_active', true);
-      const uniq = Array.from(
-        new Set((data ?? []).map((r: { class: string; section: string }) => `${r.class}-${r.section}`))
-      ).sort();
+      const uniq = uniqueClassKeys(data ?? []);
       setClassOptions(uniq);
       setSelectedClassKey((prev) => (prev && uniq.includes(prev) ? prev : uniq[0] || ''));
     })();
   }, [schoolId]);
 
+  // Exams for the selected class — a report card should cover one exam, not sum all of them.
+  useEffect(() => {
+    if (!schoolId || !selectedClassKey) return;
+    const { cls: c, section: s } = parseClassKey(selectedClassKey);
+    setShowPreview(false);
+    void supabase
+      .from('exams')
+      .select('id, name, date')
+      .eq('school_id', schoolId)
+      .eq('class', c)
+      .eq('section', s)
+      .order('date', { ascending: false })
+      .then(({ data }) => {
+        const list = (data ?? []) as { id: string; name: string }[];
+        setExams(list);
+        setExamId(list[0]?.id ?? '');
+      });
+  }, [schoolId, selectedClassKey]);
+
+  const examLabel = exams.find((e) => e.id === examId)?.name ?? 'All exams';
+
   const loadReportForClass = useCallback(async () => {
     if (!schoolId || !selectedClassKey) return null;
-    const [c, s] = selectedClassKey.split('-');
+    const { cls: c, section: s } = parseClassKey(selectedClassKey);
     const { data: studs } = await supabase
       .from('students')
       .select('id, full_name, roll_number, class, section')
@@ -106,11 +130,13 @@ const Reports = () => {
     if (!list.length) return [];
 
     const ids = list.map((x) => x.id);
-    const { data: marksRows } = await supabase
+    let mq = supabase
       .from('marks')
       .select('student_id, marks_obtained, max_marks, grade, subjects(name)')
       .eq('school_id', schoolId)
       .in('student_id', ids);
+    if (examId) mq = mq.eq('exam_id', examId);
+    const { data: marksRows } = await mq;
 
     const { data: attRows } = await supabase
       .from('attendance')
@@ -146,7 +172,19 @@ const Reports = () => {
       const pct = am && am.t > 0 ? Math.round((am.p / am.t) * 100) : 0;
       return { ...st, attendancePct: pct, marks: marksByStudent[st.id] ?? [] };
     });
-  }, [schoolId, selectedClassKey]);
+  }, [schoolId, selectedClassKey, examId]);
+
+  const showStudent = (st: (typeof classData)[number]) => {
+    setPreviewStudent({
+      id: st.id,
+      full_name: st.full_name,
+      roll_number: st.roll_number,
+      class: st.class,
+      section: st.section,
+      attendancePct: st.attendancePct,
+    });
+    setPreviewMarks(st.marks);
+  };
 
   const openPreview = async () => {
     const data = await loadReportForClass();
@@ -154,16 +192,8 @@ const Reports = () => {
       toast.error('No students in this class');
       return;
     }
-    const first = data[0];
-    setPreviewStudent({
-      id: first.id,
-      full_name: first.full_name,
-      roll_number: first.roll_number,
-      class: first.class,
-      section: first.section,
-      attendancePct: first.attendancePct,
-    });
-    setPreviewMarks(first.marks);
+    setClassData(data);
+    showStudent(data[0]);
     setShowPreview(true);
   };
 
@@ -174,6 +204,7 @@ const Reports = () => {
     }
     const doc = buildReportPdf({
       schoolName,
+      examLabel,
       student: previewStudent,
       marks: previewMarks,
     });
@@ -190,6 +221,7 @@ const Reports = () => {
     for (const st of data) {
       const doc = buildReportPdf({
         schoolName,
+        examLabel,
         student: {
           id: st.id,
           full_name: st.full_name,
@@ -209,7 +241,7 @@ const Reports = () => {
     a.href = url;
     a.download = `report-cards-${selectedClassKey}.zip`;
     a.click();
-    URL.revokeObjectURL(url);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
     toast.success('ZIP downloaded');
   };
 
@@ -220,6 +252,7 @@ const Reports = () => {
           <h3 className="font-semibold text-foreground mb-3">Generate Report Cards</h3>
           <div className="flex flex-col sm:flex-row gap-3 flex-wrap">
             <select
+              aria-label="Class"
               className="text-sm border rounded-lg px-3 py-2 bg-card text-foreground"
               value={selectedClassKey}
               onChange={(e) => setSelectedClassKey(e.target.value)}
@@ -230,8 +263,24 @@ const Reports = () => {
                 </option>
               ))}
             </select>
+            <select
+              aria-label="Exam"
+              className="text-sm border rounded-lg px-3 py-2 bg-card text-foreground"
+              value={examId}
+              onChange={(e) => {
+                setExamId(e.target.value);
+                setShowPreview(false);
+              }}
+            >
+              {exams.map((e) => (
+                <option key={e.id} value={e.id}>
+                  {e.name}
+                </option>
+              ))}
+              <option value="">All exams</option>
+            </select>
             <Button type="button" onClick={() => void openPreview()} className="gap-1.5">
-              <FileText className="w-3.5 h-3.5" /> Preview first student
+              <FileText className="w-3.5 h-3.5" /> Preview
             </Button>
             <Button type="button" variant="outline" className="gap-1.5" onClick={() => void bulkZip()}>
               <Download className="w-3.5 h-3.5" /> Bulk ZIP (all in class)
@@ -246,9 +295,26 @@ const Reports = () => {
                 <BrandLogo className="h-14 w-14" />
               </div>
               <h2 className="text-xl font-bold text-foreground">{schoolName}</h2>
-              <p className="text-sm text-muted-foreground">Report card (preview)</p>
+              <p className="text-sm text-muted-foreground">Report card — {examLabel}</p>
             </div>
 
+            {classData.length > 1 && (
+              <select
+                aria-label="Student"
+                className="w-full mb-4 text-sm border rounded-lg px-3 py-2 bg-card text-foreground"
+                value={previewStudent.id}
+                onChange={(e) => {
+                  const st = classData.find((x) => x.id === e.target.value);
+                  if (st) showStudent(st);
+                }}
+              >
+                {classData.map((st) => (
+                  <option key={st.id} value={st.id}>
+                    {st.roll_number} — {st.full_name}
+                  </option>
+                ))}
+              </select>
+            )}
             <div className="flex items-center gap-4 mb-5 p-4 rounded-lg bg-muted/50">
               <div className="w-14 h-14 rounded-xl bg-primary/10 flex items-center justify-center">
                 <User className="w-7 h-7 text-primary" />
@@ -271,6 +337,11 @@ const Reports = () => {
                 </tr>
               </thead>
               <tbody>
+                {previewMarks.length === 0 && (
+                  <tr>
+                    <td colSpan={4} className="px-4 py-6 text-center text-muted-foreground">No marks for this exam yet.</td>
+                  </tr>
+                )}
                 {previewMarks.map((m, i) => (
                   <tr key={i} className="border-b">
                     <td className="px-4 py-2 text-foreground">{m.subject}</td>

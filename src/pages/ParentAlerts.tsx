@@ -8,6 +8,7 @@ import DashboardLayout from '@/components/DashboardLayout';
 import { supabase } from '@/lib/supabase';
 import { useApp } from '@/context/AppContext';
 import { toast } from 'sonner';
+import { parseClassKey, uniqueClassKeys } from '@/lib/classes';
 
 const templates: Record<string, string> = {
   'Fee Reminder':
@@ -30,7 +31,7 @@ type AlertRow = {
 };
 
 const ParentAlerts = () => {
-  const { schoolId, userProfile } = useApp();
+  const { schoolId, userProfile, school } = useApp();
   const [msgType, setMsgType] = useState('Fee Reminder');
   const [message, setMessage] = useState(templates['Fee Reminder']);
   const [recipient, setRecipient] = useState('all');
@@ -63,9 +64,7 @@ const ParentAlerts = () => {
         .select('class, section')
         .eq('school_id', schoolId)
         .eq('is_active', true);
-      const uniq = Array.from(
-        new Set((data ?? []).map((r: { class: string; section: string }) => `${r.class}-${r.section}`))
-      ).sort();
+      const uniq = uniqueClassKeys(data ?? []);
       setClassOptions(uniq);
       setClassKey((prev) => (prev && uniq.includes(prev) ? prev : uniq[0] || ''));
     })();
@@ -79,7 +78,7 @@ const ParentAlerts = () => {
       .eq('school_id', schoolId)
       .eq('is_active', true);
     if (recipient === 'class' && classKey) {
-      const [c, s] = classKey.split('-');
+      const { cls: c, section: s } = parseClassKey(classKey);
       q = q.eq('class', c).eq('section', s);
     }
     const { data } = await q;
@@ -95,48 +94,60 @@ const ParentAlerts = () => {
 
   const sendAlert = async () => {
     if (!schoolId || !userProfile) return;
+    if (!message.trim()) {
+      toast.error('Write a message first');
+      return;
+    }
+    const sid = import.meta.env.VITE_EMAILJS_SERVICE_ID;
+    const tid = import.meta.env.VITE_EMAILJS_TEMPLATE_ID;
+    const pk = import.meta.env.VITE_EMAILJS_PUBLIC_KEY;
+    const wantsEmail = via === 'email' || via === 'both';
+    if (wantsEmail && (!sid || !tid || !pk)) {
+      // Previously the alert was still logged as "sent" even though nothing went out.
+      toast.error('Email is not configured: set VITE_EMAILJS_SERVICE_ID, VITE_EMAILJS_TEMPLATE_ID and VITE_EMAILJS_PUBLIC_KEY in .env, or choose "Log only".');
+      return;
+    }
     setBusy(true);
     try {
       const { emails, count } = await resolveRecipients();
-      if (!count) {
+      if (!count && wantsEmail) {
         toast.error('No parent emails found for this selection');
         setBusy(false);
         return;
       }
+      let status = 'logged';
 
       const recipient_type = recipient === 'all' ? 'all_parents' : `class:${classKey}`;
 
-      if (via === 'email' || via === 'both') {
-        const sid = import.meta.env.VITE_EMAILJS_SERVICE_ID;
-        const tid = import.meta.env.VITE_EMAILJS_TEMPLATE_ID;
-        const pk = import.meta.env.VITE_EMAILJS_PUBLIC_KEY;
-        if (!sid || !tid || !pk) {
-          toast.error(
-            'Configure VITE_EMAILJS_SERVICE_ID, TEMPLATE_ID, and PUBLIC_KEY in .env'
-          );
-        } else {
-          let sent = 0;
-          for (const to of emails) {
-            try {
-              await emailjs.send(
-                sid,
-                tid,
-                {
-                  to_email: to,
-                  message,
-                  school: userProfile.full_name,
-                  type: msgType,
-                },
-                { publicKey: pk }
-              );
-              sent += 1;
-            } catch (e) {
-              console.error(e);
-            }
+      if (wantsEmail) {
+        let sent = 0;
+        for (const to of emails) {
+          try {
+            await emailjs.send(
+              sid!,
+              tid!,
+              {
+                to_email: to,
+                message,
+                school: school?.name ?? userProfile.full_name,
+                type: msgType,
+              },
+              { publicKey: pk }
+            );
+            sent += 1;
+          } catch (e) {
+            console.error(e);
           }
-          if (sent === 0) toast.error('EmailJS: no messages sent (check template variables)');
-          else toast.success(`Queued/sent ${sent} email(s) via EmailJS`);
         }
+        if (sent === 0) {
+          toast.error('EmailJS: no messages sent (check template variables)');
+          status = 'failed';
+        } else {
+          toast.success(`Sent ${sent} of ${count} email(s) via EmailJS`);
+          status = sent === count ? 'sent' : `partial (${sent}/${count})`;
+        }
+      } else {
+        toast.success('Alert logged');
       }
 
       const { error } = await supabase.from('alerts').insert({
@@ -145,7 +156,7 @@ const ParentAlerts = () => {
         type: msgType,
         recipient_type,
         sent_by: userProfile.id,
-        status: via === 'sms' ? 'logged_sms_stub' : 'sent',
+        status,
       });
       if (error) throw error;
 
@@ -225,8 +236,7 @@ const ParentAlerts = () => {
                   onChange={(e) => setVia(e.target.value)}
                 >
                   <option value="email">Email (EmailJS)</option>
-                  <option value="sms">Log only (SMS not wired)</option>
-                  <option value="both">Email + log as both</option>
+                  <option value="sms">Log only (no message is sent)</option>
                 </select>
               </div>
             </div>
@@ -252,6 +262,11 @@ const ParentAlerts = () => {
                 </tr>
               </thead>
               <tbody>
+                {history.length === 0 && (
+                  <tr>
+                    <td colSpan={5} className="px-4 py-8 text-center text-muted-foreground">No alerts sent yet.</td>
+                  </tr>
+                )}
                 {history.map((a) => (
                   <tr key={a.id} className="border-b table-row-hover">
                     <td className="px-4 py-3 text-foreground">

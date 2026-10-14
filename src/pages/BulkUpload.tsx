@@ -7,6 +7,7 @@ import { supabase } from '@/lib/supabase';
 import { useApp } from '@/context/AppContext';
 import { currentAcademicYearLabel } from '@/lib/academicYear';
 import { toast } from 'sonner';
+import { normalizeDob, normalizeGender } from '@/lib/bulkUpload';
 
 type RowPreview = {
   full_name: string;
@@ -28,8 +29,10 @@ function normalizeHeader(h: string): string {
 function rowFromRecord(rec: Record<string, unknown>): RowPreview | null {
   const keys = Object.keys(rec);
   const map: Record<string, string> = {};
+  const raw: Record<string, unknown> = {};
   keys.forEach((k) => {
     map[normalizeHeader(k)] = String(rec[k] ?? '').trim();
+    raw[normalizeHeader(k)] = rec[k];
   });
   const full_name =
     map.full_name || map.name || map.student_name || map['student_name'] || '';
@@ -49,8 +52,8 @@ function rowFromRecord(rec: Record<string, unknown>): RowPreview | null {
     section: section || 'A',
     parent_phone: map.parent_phone || map.phone || '',
     parent_email: map.parent_email || map.email || '',
-    dob: map.dob || map.date_of_birth || '',
-    gender: map.gender || 'Male',
+    dob: normalizeDob(raw.dob ?? raw.date_of_birth),
+    gender: normalizeGender(map.gender || ''),
     parent_name: map.parent_name || map.guardian || '',
     address: map.address || '',
   };
@@ -96,7 +99,8 @@ const BulkUpload = () => {
 
   const parseFile = async (file: File) => {
     const buf = await file.arrayBuffer();
-    const wb = XLSX.read(buf, { type: 'array' });
+    // raw: keep CSV text as-is (SheetJS would read 05/11/2011 as US M/D); real Excel date cells still arrive as Date.
+    const wb = XLSX.read(buf, { type: 'array', cellDates: true, raw: true });
     const sheet = wb.Sheets[wb.SheetNames[0]];
     const json = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet);
     const rows: RowPreview[] = [];
@@ -114,6 +118,7 @@ const BulkUpload = () => {
     setBusy(true);
     let ok = 0;
     let fail = 0;
+    const failures: string[] = [];
     const year = currentAcademicYearLabel();
     for (const r of preview) {
       try {
@@ -126,7 +131,7 @@ const BulkUpload = () => {
             class: r.class,
             section: r.section,
             dob: r.dob || null,
-            gender: r.gender,
+            gender: r.gender || null,
             parent_name: r.parent_name || null,
             parent_phone: r.parent_phone || null,
             parent_email: r.parent_email || null,
@@ -137,6 +142,7 @@ const BulkUpload = () => {
           .single();
         if (error) throw error;
         const sid = (inserted as { id: string }).id;
+        // Fee total starts at 0; set it per student via Students → Edit.
         await supabase.from('fees').insert({
           school_id: schoolId,
           student_id: sid,
@@ -144,11 +150,24 @@ const BulkUpload = () => {
           academic_year: year,
         });
         ok += 1;
-      } catch {
+      } catch (e) {
         fail += 1;
+        const msg = (e as { code?: string; message?: string })?.code === '23505'
+          ? 'roll number already exists'
+          : (e as { message?: string })?.message ?? 'error';
+        failures.push(`Roll ${r.roll_number}: ${msg}`);
       }
     }
-    toast.success(`Uploaded: ${ok} success, ${fail} errors`);
+    if (fail) {
+      toast.warning(`Uploaded ${ok}, failed ${fail}`, {
+        description:
+          failures.slice(0, 5).join('; ') +
+          (failures.length > 5 ? `; …and ${failures.length - 5} more` : ''),
+        duration: 10000,
+      });
+    } else {
+      toast.success(`Uploaded ${ok} student(s)`);
+    }
     setPreview([]);
     setBusy(false);
   };
@@ -234,7 +253,8 @@ const BulkUpload = () => {
           <ul className="text-sm text-muted-foreground space-y-1 list-disc list-inside">
             <li>Required columns: name, roll number, class (use separate section column or &quot;10-A&quot; in class).</li>
             <li>Duplicate roll numbers in the same school will fail for those rows.</li>
-            <li>After upload, set fee amounts in Fee Management or edit each student.</li>
+            <li>Dates of birth can be Excel dates, YYYY-MM-DD or DD/MM/YYYY.</li>
+            <li>After upload, set each student&apos;s annual fee from Students → Edit.</li>
           </ul>
         </div>
       </div>

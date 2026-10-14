@@ -22,12 +22,13 @@ import {
   CartesianGrid,
   Tooltip,
   ResponsiveContainer,
-  Legend,
 } from 'recharts';
 import DashboardLayout from '@/components/DashboardLayout';
 import { supabase } from '@/lib/supabase';
 import { useApp } from '@/context/AppContext';
-import { currentAcademicYearLabel } from '@/lib/academicYear';
+import { academicYearRange, currentAcademicYearLabel } from '@/lib/academicYear';
+import { monthBounds, toLocalISODate } from '@/lib/dates';
+import { sumPaymentsByStudent } from '@/lib/fees';
 
 const quickActions = [
   { label: 'Add Student', icon: UserPlus, to: '/add-student' },
@@ -48,9 +49,9 @@ const AdminDashboard = () => {
   const { schoolId } = useApp();
   const [totalStudents, setTotalStudents] = useState(0);
   const [defaulters, setDefaulters] = useState(0);
-  const [presentPct, setPresentPct] = useState(0);
+  const [presentPct, setPresentPct] = useState<number | null>(null);
   const [upcomingExams, setUpcomingExams] = useState(0);
-  const [feeChart, setFeeChart] = useState<{ month: string; collected: number; pending: number }[]>(
+  const [feeChart, setFeeChart] = useState<{ month: string; collected: number }[]>(
     []
   );
   const [activity, setActivity] = useState<{ id: string; action: string; time: string; type: string }[]>([]);
@@ -58,6 +59,7 @@ const AdminDashboard = () => {
   const load = useCallback(async () => {
     if (!schoolId) return;
     const year = currentAcademicYearLabel();
+    const yr = academicYearRange();
     const { count: stuCount } = await supabase
       .from('students')
       .select('*', { count: 'exact', head: true })
@@ -79,11 +81,10 @@ const AdminDashboard = () => {
         .from('fee_payments')
         .select('student_id, amount_paid')
         .eq('school_id', schoolId)
+        .gte('payment_date', yr.start)
+        .lte('payment_date', yr.end)
         .in('student_id', ids);
-      const paid: Record<string, number> = {};
-      (pays ?? []).forEach((p: { student_id: string; amount_paid: number }) => {
-        paid[p.student_id] = (paid[p.student_id] ?? 0) + Number(p.amount_paid);
-      });
+      const paid = sumPaymentsByStudent(pays ?? []);
       const total: Record<string, number> = {};
       (fees ?? []).forEach((f: { student_id: string; total_fee_amount: number }) => {
         total[f.student_id] = Number(f.total_fee_amount);
@@ -96,7 +97,7 @@ const AdminDashboard = () => {
     }
     setDefaulters(def);
 
-    const today = new Date().toISOString().slice(0, 10);
+    const today = toLocalISODate();
     const { data: attToday } = await supabase
       .from('attendance')
       .select('status')
@@ -104,7 +105,7 @@ const AdminDashboard = () => {
       .eq('date', today);
     const list = attToday ?? [];
     const pres = list.filter((a: { status: string }) => a.status === 'present').length;
-    setPresentPct(list.length ? Math.round((pres / list.length) * 100) : 0);
+    setPresentPct(list.length ? Math.round((pres / list.length) * 100) : null);
 
     const { count: exCount } = await supabase
       .from('exams')
@@ -112,24 +113,23 @@ const AdminDashboard = () => {
       .eq('school_id', schoolId);
     setUpcomingExams(exCount ?? 0);
 
-    const months: { month: string; collected: number; pending: number }[] = [];
+    // One query for the 6-month window, bucketed by month locally.
+    const now = new Date();
+    const first = new Date(now.getFullYear(), now.getMonth() - 5, 1);
+    const { data: pmts } = await supabase
+      .from('fee_payments')
+      .select('amount_paid, payment_date')
+      .eq('school_id', schoolId)
+      .gte('payment_date', monthBounds(first).start)
+      .lte('payment_date', monthBounds(now).end);
+    const months: { month: string; collected: number }[] = [];
     for (let i = 5; i >= 0; i -= 1) {
-      const d = new Date();
-      d.setMonth(d.getMonth() - i);
-      const label = d.toLocaleString('default', { month: 'short' });
-      const start = new Date(d.getFullYear(), d.getMonth(), 1).toISOString().slice(0, 10);
-      const end = new Date(d.getFullYear(), d.getMonth() + 1, 0).toISOString().slice(0, 10);
-      const { data: pmts } = await supabase
-        .from('fee_payments')
-        .select('amount_paid')
-        .eq('school_id', schoolId)
-        .gte('payment_date', start)
-        .lte('payment_date', end);
-      const collected = (pmts ?? []).reduce(
-        (a: number, p: { amount_paid: number }) => a + Number(p.amount_paid),
-        0
-      );
-      months.push({ month: label, collected, pending: Math.max(0, def * 5000 - collected) });
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      const { start, end } = monthBounds(d);
+      const collected = (pmts ?? [])
+        .filter((p: { payment_date: string }) => p.payment_date >= start && p.payment_date <= end)
+        .reduce((a: number, p: { amount_paid: number }) => a + Number(p.amount_paid), 0);
+      months.push({ month: d.toLocaleString('default', { month: 'short' }), collected });
     }
     setFeeChart(months);
 
@@ -138,7 +138,7 @@ const AdminDashboard = () => {
       .select('amount_paid, payment_date, students(full_name)')
       .eq('school_id', schoolId)
       .order('created_at', { ascending: false })
-      .limit(3);
+      .limit(5);
     const act: typeof activity = [];
     (recentPay ?? []).forEach((r: Record<string, unknown>, idx: number) => {
       const st = r.students as { full_name?: string } | null;
@@ -155,7 +155,7 @@ const AdminDashboard = () => {
         : [
             {
               id: '1',
-              action: 'Welcome — add students to see live activity',
+              action: 'No fee payments yet — collected fees will appear here',
               time: 'Now',
               type: 'student',
             },
@@ -170,7 +170,7 @@ const AdminDashboard = () => {
   const stats = [
     { label: 'Total Students', value: String(totalStudents), icon: Users, color: 'text-primary', bg: 'bg-primary/10' },
     { label: 'Fee Defaulters', value: String(defaulters), icon: AlertTriangle, color: 'text-destructive', bg: 'bg-destructive/10' },
-    { label: 'Present Today', value: `${presentPct}%`, icon: CheckCircle, color: 'text-emerald-600', bg: 'bg-emerald-50' },
+    { label: presentPct === null ? 'Attendance not marked today' : 'Present Today', value: presentPct === null ? '—' : `${presentPct}%`, icon: CheckCircle, color: 'text-emerald-600', bg: 'bg-emerald-50' },
     { label: 'Exams recorded', value: String(upcomingExams), icon: BookOpen, color: 'text-amber-600', bg: 'bg-amber-50' },
   ];
 
@@ -222,9 +222,7 @@ const AdminDashboard = () => {
               <XAxis dataKey="month" tick={{ fontSize: 12 }} />
               <YAxis tick={{ fontSize: 12 }} tickFormatter={(v) => `₹${v / 1000}k`} />
               <Tooltip formatter={(v: number) => `₹${v.toLocaleString()}`} />
-              <Legend />
               <Bar dataKey="collected" fill="hsl(217 91% 50%)" radius={[4, 4, 0, 0]} name="Collected" />
-              <Bar dataKey="pending" fill="hsl(0 72% 51%)" radius={[4, 4, 0, 0]} name="Pending (approx.)" />
             </BarChart>
           </ResponsiveContainer>
         </div>

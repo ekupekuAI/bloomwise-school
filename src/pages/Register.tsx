@@ -8,6 +8,8 @@ import { Textarea } from '@/components/ui/textarea';
 import { supabase } from '@/lib/supabase';
 import { useApp } from '@/context/AppContext';
 import { toast } from 'sonner';
+import { SetupNotice } from '@/components/SetupNotice';
+import { completeRegistration, type PendingRegistration } from '@/lib/registration';
 
 type Mode = 'admin' | 'teacher';
 
@@ -29,51 +31,46 @@ const Register = () => {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setBusy(true);
+    const pending: PendingRegistration =
+      mode === 'admin'
+        ? {
+            mode,
+            full_name: fullName.trim(),
+            school_name: schoolName.trim(),
+            address: address.trim(),
+            phone: phone.trim(),
+            email: schoolEmail.trim(),
+          }
+        : { mode, full_name: fullName.trim(), school_code: schoolCode.trim() };
     try {
+      // Details are also saved on the auth user so the profile can be finished on first
+      // login when the Supabase project requires email confirmation (no session yet).
       const { data, error: signErr } = await supabase.auth.signUp({
         email: email.trim(),
         password,
+        options: { data: { pending_registration: pending } },
       });
       if (signErr) throw signErr;
       if (!data.session) {
         toast.message(
-          'Check your email to confirm your account, then sign in.',
+          'Check your email to confirm your account, then sign in to finish setup.',
           { duration: 6000 }
         );
         navigate('/login');
         return;
       }
 
-      if (mode === 'admin') {
-        const { error: rpcErr } = await supabase.rpc('register_new_school', {
-          p_school_name: schoolName.trim(),
-          p_address: address.trim(),
-          p_phone: phone.trim(),
-          p_email: schoolEmail.trim(),
-          p_full_name: fullName.trim(),
-          p_logo_url: null,
-        });
-        if (rpcErr) {
-          await supabase.auth.signOut();
-          throw rpcErr;
-        }
-        toast.success('School and admin account created');
-      } else {
-        const { error: rpcErr } = await supabase.rpc('register_teacher', {
-          p_school_code: schoolCode.trim(),
-          p_full_name: fullName.trim(),
-        });
-        if (rpcErr) {
-          await supabase.auth.signOut();
-          throw rpcErr;
-        }
-        toast.success('Teacher profile linked to school');
+      const { error: rpcErr } = await completeRegistration(pending);
+      if (rpcErr) {
+        await supabase.auth.signOut();
+        throw rpcErr;
       }
+      toast.success(mode === 'admin' ? 'School and admin account created' : 'Teacher profile linked to school');
 
       await refreshProfile();
       navigate(mode === 'admin' ? '/admin' : '/teacher', { replace: true });
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : 'Registration failed';
+      const message = (err as { message?: string })?.message || 'Registration failed';
       toast.error(message);
     } finally {
       setBusy(false);
@@ -91,6 +88,7 @@ const Register = () => {
           <p className="text-muted-foreground text-sm mt-1">SmartSchool Manager</p>
         </div>
         <div className="card-elevated p-6">
+          <SetupNotice />
           <div className="flex rounded-lg border overflow-hidden mb-4">
             {(['admin', 'teacher'] as const).map((m) => (
               <button

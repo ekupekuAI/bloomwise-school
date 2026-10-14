@@ -4,11 +4,12 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from 'react';
 import type { User } from '@supabase/supabase-js';
-import { supabase } from '@/lib/supabase';
+import { isSupabaseConfigured, supabase } from '@/lib/supabase';
 
 export type UserRole = 'admin' | 'teacher';
 
@@ -58,8 +59,8 @@ async function fetchProfileAndSchool(userId: string): Promise<{
     return { profile: null, school: null };
   }
 
-  // Typecasting to separate data from the joined 'schools' payload
-  const { schools, ...profileData } = data as any;
+  // Separate the joined 'schools' payload from the profile columns
+  const { schools, ...profileData } = data as Record<string, unknown> & { schools: unknown };
   const schoolPayload = Array.isArray(schools) ? schools[0] : schools;
 
   return {
@@ -74,8 +75,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [school, setSchool] = useState<School | null>(null);
   const [loading, setLoading] = useState(true);
 
-  const refreshProfile = useCallback(async (sessionUser?: User): Promise<UserProfile | null> => {
-    const user = sessionUser || (await supabase.auth.getUser()).data.user;
+  // Each profile load gets a sequence number so a slow, older response (e.g. the
+  // SIGNED_IN event fired before registration finished) can't overwrite a newer one.
+  const seq = useRef(0);
+
+  const loadFor = useCallback(async (user: User | null): Promise<UserProfile | null> => {
+    const mine = ++seq.current;
     if (!user) {
       setCurrentUser(null);
       setUserProfile(null);
@@ -83,39 +88,36 @@ export function AppProvider({ children }: { children: ReactNode }) {
       return null;
     }
     const { profile, school: sch } = await fetchProfileAndSchool(user.id);
-    setCurrentUser(user);
-    setUserProfile(profile);
-    setSchool(sch);
+    if (mine === seq.current) {
+      setCurrentUser(user);
+      setUserProfile(profile);
+      setSchool(sch);
+    }
     return profile;
   }, []);
 
+  const refreshProfile = useCallback(
+    async (sessionUser?: User): Promise<UserProfile | null> => {
+      const user = sessionUser || (await supabase.auth.getUser()).data.user;
+      return loadFor(user ?? null);
+    },
+    [loadFor]
+  );
+
   useEffect(() => {
-    let mounted = true;
-    (async () => {
-      await refreshProfile();
-      if (mounted) setLoading(false);
-    })();
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      async (_event, session) => {
-        if (!session?.user) {
-          setCurrentUser(null);
-          setUserProfile(null);
-          setSchool(null);
-          return;
-        }
-        const { profile, school: sch } = await fetchProfileAndSchool(
-          session.user.id
-        );
-        setCurrentUser(session.user);
-        setUserProfile(profile);
-        setSchool(sch);
-      }
-    );
-    return () => {
-      mounted = false;
-      subscription.unsubscribe();
-    };
-  }, [refreshProfile]);
+    if (!isSupabaseConfigured) {
+      setLoading(false);
+      return;
+    }
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      if (event === 'TOKEN_REFRESHED') return;
+      // Defer: calling Supabase inside this callback can deadlock the auth client.
+      setTimeout(() => {
+        void loadFor(session?.user ?? null).finally(() => setLoading(false));
+      }, 0);
+    });
+    return () => subscription.unsubscribe();
+  }, [loadFor]);
 
   const signOut = useCallback(async () => {
     await supabase.auth.signOut();

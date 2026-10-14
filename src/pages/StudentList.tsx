@@ -1,15 +1,17 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Search, Plus, Upload, Eye, Pencil, User } from 'lucide-react';
+import { Search, Plus, Upload, Eye, Pencil } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import DashboardLayout from '@/components/DashboardLayout';
 import { supabase } from '@/lib/supabase';
 import { useApp } from '@/context/AppContext';
-import { currentAcademicYearLabel } from '@/lib/academicYear';
+import { academicYearRange, currentAcademicYearLabel } from '@/lib/academicYear';
+import { feeStatus, feeStatusBadge, feeStatusLabel, sumPaymentsByStudent, type FeeStatus } from '@/lib/fees';
+import { parseClassKey, uniqueClassKeys } from '@/lib/classes';
+import { sanitizeSearchTerm } from '@/lib/search';
+import { StudentPhoto } from '@/components/StudentPhoto';
 import { toast } from 'sonner';
-
-type FeeStatus = 'paid' | 'unpaid' | 'overdue';
 
 type RowStudent = {
   id: string;
@@ -19,13 +21,6 @@ type RowStudent = {
   section: string;
   photo_url: string | null;
 };
-
-function deriveFeeStatus(total: number, paid: number): FeeStatus {
-  if (total <= 0) return paid > 0 ? 'paid' : 'unpaid';
-  if (paid >= total) return 'paid';
-  if (paid <= 0) return 'unpaid';
-  return 'overdue';
-}
 
 const perPage = 20;
 
@@ -47,6 +42,7 @@ const StudentList = () => {
   const [attendancePct, setAttendancePct] = useState<Record<string, number>>({});
 
   const academicYear = currentAcademicYearLabel();
+  const yearRange = academicYearRange();
 
   const load = useCallback(async () => {
     if (!schoolId) return;
@@ -58,12 +54,7 @@ const StudentList = () => {
         .eq('school_id', schoolId)
         .eq('is_active', true);
 
-      const uniq = Array.from(
-        new Set(
-          (dist ?? []).map((r) => `${(r as { class: string }).class}-${(r as { section: string }).section}`)
-        )
-      ).sort();
-      setClassOptions(uniq);
+      setClassOptions(uniqueClassKeys((dist ?? []) as { class: string; section: string }[]));
 
       const buildBase = (withCount: boolean) => {
         let q = supabase
@@ -71,12 +62,12 @@ const StudentList = () => {
           .select('*', withCount ? { count: 'exact' } : undefined)
           .eq('school_id', schoolId)
           .eq('is_active', true);
-        if (search.trim()) {
-          const s = search.trim().replace(/%/g, '');
-          q = q.or(`full_name.ilike.%${s}%,roll_number.ilike.%${s}%`);
+        const term = sanitizeSearchTerm(search);
+        if (term) {
+          q = q.or(`full_name.ilike.%${term}%,roll_number.ilike.%${term}%`);
         }
         if (classFilter) {
-          const [c, sec] = classFilter.split('-');
+          const { cls: c, section: sec } = parseClassKey(classFilter);
           q = q.eq('class', c).eq('section', sec);
         }
         return q.order('roll_number');
@@ -102,11 +93,10 @@ const StudentList = () => {
             .from('fee_payments')
             .select('student_id, amount_paid')
             .eq('school_id', schoolId)
+            .gte('payment_date', yearRange.start)
+            .lte('payment_date', yearRange.end)
             .in('student_id', allIds);
-          const paidMap: Record<string, number> = {};
-          (payRows ?? []).forEach((p: { student_id: string; amount_paid: number }) => {
-            paidMap[p.student_id] = (paidMap[p.student_id] ?? 0) + Number(p.amount_paid);
-          });
+          const paidMap = sumPaymentsByStudent(payRows ?? []);
           const totalMap: Record<string, number> = {};
           (feeRows ?? []).forEach((f: { student_id: string; total_fee_amount: number }) => {
             totalMap[f.student_id] = Number(f.total_fee_amount);
@@ -115,7 +105,7 @@ const StudentList = () => {
           allIds.forEach((id) => {
             const total = totalMap[id] ?? 0;
             const paid = paidMap[id] ?? 0;
-            feeMapAll[id] = { total, paid, status: deriveFeeStatus(total, paid) };
+            feeMapAll[id] = { total, paid, status: feeStatus(total, paid) };
           });
         }
         const filtered = all.filter((s) => feeMapAll[s.id]?.status === feeFilter);
@@ -175,12 +165,11 @@ const StudentList = () => {
         .from('fee_payments')
         .select('student_id, amount_paid')
         .eq('school_id', schoolId)
+        .gte('payment_date', yearRange.start)
+        .lte('payment_date', yearRange.end)
         .in('student_id', ids);
 
-      const paidMap: Record<string, number> = {};
-      (payRows ?? []).forEach((p: { student_id: string; amount_paid: number }) => {
-        paidMap[p.student_id] = (paidMap[p.student_id] ?? 0) + Number(p.amount_paid);
-      });
+      const paidMap = sumPaymentsByStudent(payRows ?? []);
 
       const totalMap: Record<string, number> = {};
       (feeRows ?? []).forEach((f: { student_id: string; total_fee_amount: number }) => {
@@ -194,7 +183,7 @@ const StudentList = () => {
         feeMap[id] = {
           total,
           paid,
-          status: deriveFeeStatus(total, paid),
+          status: feeStatus(total, paid),
         };
       });
       setFeeByStudent(feeMap);
@@ -223,7 +212,7 @@ const StudentList = () => {
     } finally {
       setLoading(false);
     }
-  }, [schoolId, search, classFilter, page, academicYear, feeFilter]);
+  }, [schoolId, search, classFilter, page, academicYear, yearRange.start, yearRange.end, feeFilter]);
 
   useEffect(() => {
     load();
@@ -261,16 +250,21 @@ const StudentList = () => {
               </option>
             ))}
           </select>
-          <select
-            className="text-sm border rounded-lg px-3 py-2 bg-card text-foreground"
-            value={feeFilter}
-            onChange={(e) => setFeeFilter(e.target.value)}
-          >
-            <option value="">Fee Status</option>
-            <option value="paid">Paid</option>
-            <option value="unpaid">Unpaid</option>
-            <option value="overdue">Overdue</option>
-          </select>
+          {/* Fees are admin-only (RLS), so teachers would only ever see "No fee set". */}
+          {role === 'admin' && (
+            <select
+              aria-label="Fee status"
+              className="text-sm border rounded-lg px-3 py-2 bg-card text-foreground"
+              value={feeFilter}
+              onChange={(e) => setFeeFilter(e.target.value)}
+            >
+              <option value="">Fee Status</option>
+              <option value="paid">Paid</option>
+              <option value="partial">Partial</option>
+              <option value="unpaid">Unpaid</option>
+              <option value="none">No fee set</option>
+            </select>
+          )}
           {role === 'admin' && (
             <>
               <Link to="/bulk-upload">
@@ -296,7 +290,9 @@ const StudentList = () => {
                 <th className="text-left px-4 py-3 font-medium text-muted-foreground">Student</th>
                 <th className="text-left px-4 py-3 font-medium text-muted-foreground">Roll No</th>
                 <th className="text-left px-4 py-3 font-medium text-muted-foreground">Class</th>
-                <th className="text-left px-4 py-3 font-medium text-muted-foreground">Fee Status</th>
+                {role === 'admin' && (
+                  <th className="text-left px-4 py-3 font-medium text-muted-foreground">Fee Status</th>
+                )}
                 <th className="text-left px-4 py-3 font-medium text-muted-foreground">Attendance</th>
                 <th className="text-right px-4 py-3 font-medium text-muted-foreground">Actions</th>
               </tr>
@@ -304,44 +300,40 @@ const StudentList = () => {
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan={6} className="px-4 py-8 text-center text-muted-foreground">
+                  <td colSpan={role === 'admin' ? 6 : 5} className="px-4 py-8 text-center text-muted-foreground">
                     Loading…
+                  </td>
+                </tr>
+              ) : students.length === 0 ? (
+                <tr>
+                  <td colSpan={role === 'admin' ? 6 : 5} className="px-4 py-10 text-center text-muted-foreground">
+                    {search || classFilter || feeFilter
+                      ? 'No students match these filters.'
+                      : role === 'admin'
+                        ? 'No students yet — add one or use Bulk Upload.'
+                        : 'No students have been added to this school yet.'}
                   </td>
                 </tr>
               ) : (
                 students.map((s) => {
-                  const fs = feeByStudent[s.id]?.status ?? 'unpaid';
+                  const fs = feeByStudent[s.id]?.status ?? 'none';
                   const pct = attendancePct[s.id] ?? 0;
                   const displayClass = `${s.class}-${s.section}`;
                   return (
                     <tr key={s.id} className="border-b table-row-hover">
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-3">
-                          <div className="w-9 h-9 rounded-full bg-primary/10 overflow-hidden flex items-center justify-center shrink-0">
-                            {s.photo_url ? (
-                              <img src={s.photo_url} alt="" className="w-full h-full object-cover" />
-                            ) : (
-                              <User className="w-4 h-4 text-primary" />
-                            )}
-                          </div>
+                          <StudentPhoto value={s.photo_url} className="w-9 h-9" />
                           <span className="font-medium text-foreground">{s.full_name}</span>
                         </div>
                       </td>
                       <td className="px-4 py-3 text-muted-foreground">{s.roll_number}</td>
                       <td className="px-4 py-3 text-muted-foreground">{displayClass}</td>
-                      <td className="px-4 py-3">
-                        <span
-                          className={
-                            fs === 'paid'
-                              ? 'badge-paid'
-                              : fs === 'unpaid'
-                                ? 'badge-unpaid'
-                                : 'badge-overdue'
-                          }
-                        >
-                          {fs.charAt(0).toUpperCase() + fs.slice(1)}
-                        </span>
-                      </td>
+                      {role === 'admin' && (
+                        <td className="px-4 py-3">
+                          <span className={feeStatusBadge[fs]}>{feeStatusLabel[fs]}</span>
+                        </td>
+                      )}
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-2">
                           <div className="w-16 h-1.5 rounded-full bg-muted overflow-hidden">

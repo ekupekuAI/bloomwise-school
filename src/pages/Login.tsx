@@ -7,6 +7,8 @@ import { Label } from '@/components/ui/label';
 import { supabase } from '@/lib/supabase';
 import { useApp } from '@/context/AppContext';
 import { toast } from 'sonner';
+import { SetupNotice } from '@/components/SetupNotice';
+import { completeRegistration, pendingRegistrationOf } from '@/lib/registration';
 
 const Login = () => {
   const navigate = useNavigate();
@@ -49,8 +51,20 @@ const Login = () => {
       });
       if (error) throw error;
       
-      const profile = await refreshProfile(data.user);
-      
+      let profile = await refreshProfile(data.user);
+
+      const pending = !profile ? pendingRegistrationOf(data.user) : null;
+      if (pending) {
+        const { error: regErr } = await completeRegistration(pending);
+        if (regErr) {
+          toast.error(regErr.message);
+          await supabase.auth.signOut();
+          setBusy(false);
+          return;
+        }
+        profile = await refreshProfile(data.user);
+      }
+
       if (!profile) {
         toast.error('Profile missing. Complete registration first.');
         await supabase.auth.signOut();
@@ -68,7 +82,7 @@ const Login = () => {
         !from.startsWith('/register');
       navigate(ok ? from : defaultPath, { replace: true });
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : 'Sign in failed';
+      const message = (err as { message?: string })?.message || 'Sign in failed';
       toast.error(message);
       setBusy(false);
     }
@@ -85,6 +99,7 @@ const Login = () => {
           <p className="text-muted-foreground text-sm mt-1">Sign in to SmartSchool Manager</p>
         </div>
         <div className="card-elevated p-6">
+          <SetupNotice />
           <form onSubmit={handleSubmit} className="space-y-4">
             <div>
               <Label htmlFor="email">Email</Label>

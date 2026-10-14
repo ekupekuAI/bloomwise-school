@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Save } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -8,6 +8,8 @@ import { supabase } from '@/lib/supabase';
 import { useApp } from '@/context/AppContext';
 import { gradeFromMarks } from '@/lib/grades';
 import { toast } from 'sonner';
+import { toLocalISODate } from '@/lib/dates';
+import { parseClassKey, uniqueClassKeys } from '@/lib/classes';
 
 type ExamType = 'unit_test' | 'mid_term' | 'final';
 
@@ -26,10 +28,13 @@ const MarksEntry = () => {
   const [subjectName, setSubjectName] = useState('Mathematics');
   const [examName, setExamName] = useState('Unit Test 1');
   const [examType, setExamType] = useState<ExamType>('unit_test');
-  const [examDate, setExamDate] = useState(new Date().toISOString().split('T')[0]);
+  const [examDate, setExamDate] = useState(toLocalISODate());
   const [maxMarks, setMaxMarks] = useState(100);
   const [students, setStudents] = useState<{ id: string; full_name: string; roll_number: string }[]>([]);
-  const [marks, setMarks] = useState<Record<string, number>>({});
+  // Raw input text per student; '' means not entered (not zero).
+  const [marks, setMarks] = useState<Record<string, string>>({});
+  const [saving, setSaving] = useState(false);
+  const marksFromDb = useRef(false);
   const [subjectId, setSubjectId] = useState<string | null>(null);
   const [examId, setExamId] = useState<string | null>(null);
 
@@ -41,9 +46,7 @@ const MarksEntry = () => {
         .select('class, section')
         .eq('school_id', schoolId)
         .eq('is_active', true);
-      const uniq = Array.from(
-        new Set((data ?? []).map((r: { class: string; section: string }) => `${r.class}-${r.section}`))
-      ).sort();
+      const uniq = uniqueClassKeys(data ?? []);
       setClassOptions(uniq);
       setSelectedClassKey((prev) => (prev && uniq.includes(prev) ? prev : uniq[0] || ''));
     })();
@@ -51,7 +54,7 @@ const MarksEntry = () => {
 
   const loadStudents = useCallback(async () => {
     if (!schoolId || !selectedClassKey) return;
-    const [c, s] = selectedClassKey.split('-');
+    const { cls: c, section: s } = parseClassKey(selectedClassKey);
     const { data } = await supabase
       .from('students')
       .select('id, full_name, roll_number')
@@ -73,9 +76,50 @@ const MarksEntry = () => {
     setExamId(null);
   }, [selectedClassKey, subjectName, examName, examType, examDate]);
 
+  // Show marks already saved for this class / subject / exam so they can be reviewed and edited.
+  useEffect(() => {
+    if (!schoolId || !selectedClassKey || !students.length || !subjectName.trim() || !examName.trim()) return;
+    const { cls: c, section: sec } = parseClassKey(selectedClassKey);
+    let alive = true;
+    const t = setTimeout(async () => {
+      const [{ data: sub }, { data: ex }] = await Promise.all([
+        supabase.from('subjects').select('id').eq('school_id', schoolId).eq('class', c).eq('section', sec).eq('name', subjectName.trim()).limit(1),
+        supabase.from('exams').select('id').eq('school_id', schoolId).eq('class', c).eq('section', sec).eq('name', examName.trim()).eq('type', examType).limit(1),
+      ]);
+      const subId = sub?.[0]?.id as string | undefined;
+      const exId = ex?.[0]?.id as string | undefined;
+      if (!alive) return;
+      if (!subId || !exId) {
+        // New subject/exam: clear only marks that were loaded for a previous one, keep typed ones.
+        if (marksFromDb.current) setMarks({});
+        marksFromDb.current = false;
+        return;
+      }
+      const { data: rows } = await supabase
+        .from('marks')
+        .select('student_id, marks_obtained, max_marks')
+        .eq('school_id', schoolId)
+        .eq('subject_id', subId)
+        .eq('exam_id', exId)
+        .in('student_id', students.map((x) => x.id));
+      if (!alive) return;
+      const next: Record<string, string> = {};
+      (rows ?? []).forEach((r: { student_id: string; marks_obtained: number; max_marks: number }) => {
+        next[r.student_id] = String(r.marks_obtained);
+      });
+      if (rows?.length) setMaxMarks(Number(rows[0].max_marks) || 100);
+      marksFromDb.current = true;
+      setMarks(next);
+    }, 350);
+    return () => {
+      alive = false;
+      clearTimeout(t);
+    };
+  }, [schoolId, selectedClassKey, students, subjectName, examName, examType]);
+
   const resolveSubjectAndExam = async (): Promise<{ subId: string; exId: string } | null> => {
     if (!schoolId || !selectedClassKey || !userProfile) return null;
-    const [c, sec] = selectedClassKey.split('-');
+    const { cls: c, section: sec } = parseClassKey(selectedClassKey);
 
     let sub = subjectId;
     if (!sub) {
@@ -157,14 +201,35 @@ const MarksEntry = () => {
   };
 
   const saveAll = async () => {
-    if (!schoolId || !students.length) return;
+    if (!schoolId || !students.length || saving) return;
+    const invalid = students.find((s) => {
+      const t = (marks[s.id] ?? '').trim();
+      if (!t) return false;
+      const n = Number(t);
+      return Number.isNaN(n) || n < 0 || n > maxMarks;
+    });
+    if (invalid) {
+      toast.error(`Marks for ${invalid.full_name} must be between 0 and ${maxMarks}`);
+      return;
+    }
+    setSaving(true);
+    try {
+      await saveRows();
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const saveRows = async () => {
+    if (!schoolId) return;
     const pair = await resolveSubjectAndExam();
     if (!pair) return;
 
     const rows = students
       .map((s) => {
-        const raw = marks[s.id];
-        if (raw === undefined || Number.isNaN(raw)) return null;
+        const t = (marks[s.id] ?? '').trim();
+        if (!t) return null;
+        const raw = Number(t);
         const g = gradeFromMarks(raw, maxMarks);
         return {
           school_id: schoolId,
@@ -268,6 +333,13 @@ const MarksEntry = () => {
               </tr>
             </thead>
             <tbody>
+              {students.length === 0 && (
+                <tr>
+                  <td colSpan={3} className="px-4 py-8 text-center text-muted-foreground">
+                    {classOptions.length ? 'No active students in this class.' : 'No students yet.'}
+                  </td>
+                </tr>
+              )}
               {students.map((s) => (
                 <tr key={s.id} className="border-b table-row-hover">
                   <td className="px-4 py-3">
@@ -280,15 +352,16 @@ const MarksEntry = () => {
                       min={0}
                       max={maxMarks}
                       className="w-20 mx-auto text-center"
+                      aria-label={`Marks for ${s.full_name}`}
                       value={marks[s.id] ?? ''}
                       onChange={(e) =>
-                        setMarks((prev) => ({ ...prev, [s.id]: Number(e.target.value) }))
+                        setMarks((prev) => ({ ...prev, [s.id]: e.target.value }))
                       }
                     />
                   </td>
                   <td className="px-4 py-3 text-center">
-                    {marks[s.id] !== undefined && !Number.isNaN(marks[s.id]) && (
-                      <span className="badge-paid">{gradeFromMarks(marks[s.id], maxMarks)}</span>
+                    {(marks[s.id] ?? '').trim() !== '' && !Number.isNaN(Number(marks[s.id])) && (
+                      <span className="badge-paid">{gradeFromMarks(Number(marks[s.id]), maxMarks)}</span>
                     )}
                   </td>
                 </tr>
@@ -297,8 +370,8 @@ const MarksEntry = () => {
           </table>
         </div>
 
-        <Button className="w-full gap-1.5" type="button" onClick={() => void saveAll()}>
-          <Save className="w-3.5 h-3.5" /> Save All
+        <Button className="w-full gap-1.5" type="button" disabled={saving || !students.length} onClick={() => void saveAll()}>
+          <Save className="w-3.5 h-3.5" /> {saving ? 'Saving…' : 'Save All'}
         </Button>
       </div>
     </DashboardLayout>
