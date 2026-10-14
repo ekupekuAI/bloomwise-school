@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 320" width="1200" height="320" role="img" aria-label="SmartSchool Manager — attendance, fees, marks, report cards and parent alerts in one place">
+  <title>SmartSchool Manager</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#1e1b4b"/>
+      <stop offset="0.25" stop-color="#312e81"/>
+      <stop offset="0.5" stop-color="#1d4ed8"/>
+      <stop offset="0.75" stop-color="#312e81"/>
+      <stop offset="1" stop-color="#1e1b4b"/>
+    </linearGradient>
+    <linearGradient id="title" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="0.6" stop-color="#c7d2fe"/>
+      <stop offset="1" stop-color="#fdba74"/>
+    </linearGradient>
+    <linearGradient id="mark" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#60a5fa"/>
+      <stop offset="1" stop-color="#4f46e5"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#93c5fd" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#93c5fd" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="dots" width="28" height="28" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1.4" fill="#ffffff" fill-opacity="0.08"/>
+    </pattern>
+    <clipPath id="frame"><rect width="1200" height="320" rx="24"/></clipPath>
+  </defs>
+
+  <style>
+    .shift { animation: shift 14s ease-in-out infinite alternate; }
+    .glow { animation: pulse 6s ease-in-out infinite; transform-origin: 255px 160px; }
+    .rise { opacity: 0; animation: rise 0.9s cubic-bezier(.2,.7,.2,1) forwards; }
+    .d1 { animation-delay: .15s; } .d2 { animation-delay: .35s; } .d3 { animation-delay: .55s; }
+    .d4 { animation-delay: .75s; } .d5 { animation-delay: .9s; } .d6 { animation-delay: 1.05s; } .d7 { animation-delay: 1.2s; }
+    .float { animation: float 7s ease-in-out infinite; transform-origin: 255px 160px; }
+    @keyframes shift { from { transform: translateX(0); } to { transform: translateX(-1200px); } }
+    @keyframes pulse { 0%, 100% { opacity: .55; transform: scale(1); } 50% { opacity: 1; transform: scale(1.08); } }
+    @keyframes rise { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: translateY(0); } }
+    @keyframes float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-6px); } }
+    @media (prefers-reduced-motion: reduce) {
+      .shift, .glow, .float { animation: none; }
+      .rise { animation: none; opacity: 1; }
+    }
+    text { font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, 'Helvetica Neue', Arial, sans-serif; }
+  </style>
+
+  <g clip-path="url(#frame)">
+    <rect class="shift" x="0" y="0" width="2400" height="320" fill="url(#bg)"/>
+    <rect width="1200" height="320" fill="url(#dots)"/>
+    <circle class="glow" cx="255" cy="160" r="150" fill="url(#glow)"/>
+
+    <!-- Mark: rounded tile with an open book and a check -->
+    <g class="float">
+      <g class="rise">
+        <rect x="185" y="90" width="140" height="140" rx="34" fill="url(#mark)"/>
+        <rect x="185" y="90" width="140" height="140" rx="34" fill="none" stroke="#ffffff" stroke-opacity="0.25" stroke-width="2"/>
+        <path d="M215 140 Q235 130 255 140 L255 196 Q235 186 215 196 Z" fill="#ffffff" fill-opacity="0.95"/>
+        <path d="M295 140 Q275 130 255 140 L255 196 Q275 186 295 196 Z" fill="#e0e7ff"/>
+        <circle cx="290" cy="122" r="17" fill="#f97316"/>
+        <path d="M282 122 l6 6 l10 -11" fill="none" stroke="#ffffff" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+      </g>
+    </g>
+
+    <text class="rise d1" x="380" y="150" font-size="60" font-weight="800" fill="url(#title)" letter-spacing="-1">SmartSchool Manager</text>
+    <text class="rise d2" x="382" y="194" font-size="24" font-weight="500" fill="#c7d2fe">Run your whole school from one secure dashboard.</text>
+
+    <g font-size="17" font-weight="600" fill="#e0e7ff">
+      <g class="rise d3"><rect x="382" y="222" width="126" height="36" rx="18" fill="#ffffff" fill-opacity="0.1" stroke="#ffffff" stroke-opacity="0.18"/><text x="445" y="246" text-anchor="middle">Attendance</text></g>
+      <g class="rise d4"><rect x="518" y="222" width="80" height="36" rx="18" fill="#ffffff" fill-opacity="0.1" stroke="#ffffff" stroke-opacity="0.18"/><text x="558" y="246" text-anchor="middle">Fees</text></g>
+      <g class="rise d5"><rect x="608" y="222" width="90" height="36" rx="18" fill="#ffffff" fill-opacity="0.1" stroke="#ffffff" stroke-opacity="0.18"/><text x="653" y="246" text-anchor="middle">Marks</text></g>
+      <g class="rise d6"><rect x="708" y="222" width="146" height="36" rx="18" fill="#ffffff" fill-opacity="0.1" stroke="#ffffff" stroke-opacity="0.18"/><text x="781" y="246" text-anchor="middle">Report cards</text></g>
+      <g class="rise d7"><rect x="864" y="222" width="150" height="36" rx="18" fill="#f97316" fill-opacity="0.9"/><text x="939" y="246" text-anchor="middle" fill="#ffffff">Parent alerts</text></g>
+    </g>
+  </g>
+</svg>
